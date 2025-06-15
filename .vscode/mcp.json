@@ -1,0 +1,24 @@
+{
+    "servers": [
+        {
+            "name": "mcp-jira-confluence",
+            "command": "python",
+            "module": "mcp_jira_confluence",
+            "args": [
+                "-m", "mcp_jira_confluence"
+            ],
+            "env": {
+                "JIRA_URL": "${env:JIRA_URL}",
+                "JIRA_USERNAME": "${env:JIRA_USERNAME}",
+                "JIRA_API_TOKEN": "${env:JIRA_API_TOKEN}",
+                "JIRA_PERSONAL_TOKEN": "${env:JIRA_PERSONAL_TOKEN}",
+                "CONFLUENCE_URL": "${env:CONFLUENCE_URL}",
+                "CONFLUENCE_USERNAME": "${env:CONFLUENCE_USERNAME}",
+                "CONFLUENCE_API_TOKEN": "${env:CONFLUENCE_API_TOKEN}",
+                "CONFLUENCE_PERSONAL_TOKEN": "${env:CONFLUENCE_PERSONAL_TOKEN}"
+            },
+            "logLevel": "info",
+            "enabled": true
+        }
+    ]
+}
