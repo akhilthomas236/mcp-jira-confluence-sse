@@ -88,60 +88,278 @@ class ConfluenceFormatter:
     
     @staticmethod
     def markdown_to_confluence(input_text: str) -> str:
-        """Convert Markdown text to Confluence markup."""
-        # Confluence supports most of Markdown syntax through its editor,
-        # but for direct API calls we need to convert to Confluence storage format (XHTML)
+        """Convert Markdown text to Confluence storage format (XHTML)."""
+        import re
+        
+        # For heavy formatting, let's use a more conservative approach
+        # First, try to detect if this is complex markdown
+        complexity_indicators = [
+            len(re.findall(r'\*\*.*?\*\*', input_text)),  # Bold
+            len(re.findall(r'\*.*?\*', input_text)),       # Italic  
+            len(re.findall(r'`.*?`', input_text)),         # Inline code
+            len(re.findall(r'```', input_text)),           # Code blocks
+            len(re.findall(r'^[-*]\s+', input_text, re.MULTILINE)),  # Lists
+            len(re.findall(r'^\d+\.\s+', input_text, re.MULTILINE)), # Numbered lists
+            len(re.findall(r'\[.*?\]\(.*?\)', input_text)), # Links
+        ]
+        
+        total_complexity = sum(complexity_indicators)
+        
+        # If complexity is high, use simplified conversion
+        if total_complexity > 20:
+            return ConfluenceFormatter._simple_markdown_to_confluence(input_text)
+        else:
+            return ConfluenceFormatter._detailed_markdown_to_confluence(input_text)
+    
+    @staticmethod
+    def _simple_markdown_to_confluence(input_text: str) -> str:
+        """Simple, robust markdown to Confluence conversion for complex content."""
+        import re
+        
+        # Start with the input text
         output = input_text
         
-        # Headers
-        output = re.sub(r"^# (.*?)$", r"<h1>\1</h1>", output, flags=re.MULTILINE)
-        output = re.sub(r"^## (.*?)$", r"<h2>\1</h2>", output, flags=re.MULTILINE)
-        output = re.sub(r"^### (.*?)$", r"<h3>\1</h3>", output, flags=re.MULTILINE)
-        output = re.sub(r"^#### (.*?)$", r"<h4>\1</h4>", output, flags=re.MULTILINE)
-        output = re.sub(r"^##### (.*?)$", r"<h5>\1</h5>", output, flags=re.MULTILINE)
-        output = re.sub(r"^###### (.*?)$", r"<h6>\1</h6>", output, flags=re.MULTILINE)
+        # Convert headers (most important) - process line by line to avoid issues
+        lines = output.split('\n')
+        processed_lines = []
         
-        # Bold and Italic
-        output = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", output)  # Bold
-        output = re.sub(r"__(.*?)__", r"<strong>\1</strong>", output)      # Bold
-        output = re.sub(r"\*(.*?)\*", r"<em>\1</em>", output)             # Italic
-        output = re.sub(r"_(.*?)_", r"<em>\1</em>", output)               # Italic
+        for line in lines:
+            # Convert headers
+            if line.strip().startswith('# '):
+                processed_lines.append(f'<h1>{line.strip()[2:]}</h1>')
+            elif line.strip().startswith('## '):
+                processed_lines.append(f'<h2>{line.strip()[3:]}</h2>')
+            elif line.strip().startswith('### '):
+                processed_lines.append(f'<h3>{line.strip()[4:]}</h3>')
+            elif line.strip().startswith('#### '):
+                processed_lines.append(f'<h4>{line.strip()[5:]}</h4>')
+            else:
+                processed_lines.append(line)
         
-        # Lists
-        # This is a simplified implementation
-        # Bulleted lists
-        output = re.sub(r"^- (.*?)$", r"<ul><li>\1</li></ul>", output, flags=re.MULTILINE)
-        output = re.sub(r"^* (.*?)$", r"<ul><li>\1</li></ul>", output, flags=re.MULTILINE)
+        output = '\n'.join(processed_lines)
         
-        # Numbered lists
-        output = re.sub(r"^(\d+)\. (.*?)$", r"<ol><li>\2</li></ol>", output, flags=re.MULTILINE)
+        # Convert basic formatting - be more careful with regex
+        # Bold - prioritize ** over *
+        output = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', output)
         
-        # Code blocks
-        output = re.sub(r"```(\w+)?\n(.*?)\n```", r'<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">\1</ac:parameter><ac:plain-text-body><![CDATA[\2]]></ac:plain-text-body></ac:structured-macro>', output, flags=re.DOTALL)
+        # Italic - only match single * that are not part of **
+        output = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'<em>\1</em>', output)
         
-        output = re.sub(r"`([^`]+)`", r'<code>\1</code>', output)  # Inline code
+        # Convert inline code first (to protect it from other conversions)
+        output = re.sub(r'`([^`\n]+)`', r'<code>\1</code>', output)
+        
+        # Convert code blocks to simple preformatted text (safer than macros)
+        output = re.sub(r'```[\w]*\n(.*?)\n```', r'<pre>\1</pre>', output, flags=re.DOTALL)
+        
+        # Convert simple links
+        output = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', output)
+        
+        # Convert images to simple format  
+        output = re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', r'<img src="\2" alt="\1" />', output)
+        
+        # Process lists more carefully
+        lines = output.split('\n')
+        final_lines = []
+        in_ul = False
+        in_ol = False
+        
+        for line in lines:
+            stripped = line.strip()
+            
+            # Handle unordered list items
+            if re.match(r'^[-*]\s+', stripped):
+                if not in_ul:
+                    if in_ol:
+                        final_lines.append('</ol>')
+                        in_ol = False
+                    final_lines.append('<ul>')
+                    in_ul = True
+                
+                item_content = re.sub(r'^[-*]\s+', '', stripped)
+                final_lines.append(f'<li>{item_content}</li>')
+                
+            # Handle ordered list items
+            elif re.match(r'^\d+\.\s+', stripped):
+                if not in_ol:
+                    if in_ul:
+                        final_lines.append('</ul>')
+                        in_ul = False
+                    final_lines.append('<ol>')
+                    in_ol = True
+                
+                item_content = re.sub(r'^\d+\.\s+', '', stripped)
+                final_lines.append(f'<li>{item_content}</li>')
+                
+            else:
+                # Close any open lists
+                if in_ul:
+                    final_lines.append('</ul>')
+                    in_ul = False
+                if in_ol:
+                    final_lines.append('</ol>')
+                    in_ol = False
+                
+                # Add the line
+                if stripped:
+                    # Only wrap in <p> if it's not already an HTML element
+                    if not (stripped.startswith('<') and stripped.endswith('>')):
+                        final_lines.append(f'<p>{stripped}</p>')
+                    else:
+                        final_lines.append(stripped)
+                else:
+                    final_lines.append('')
+        
+        # Close any remaining lists
+        if in_ul:
+            final_lines.append('</ul>')
+        if in_ol:
+            final_lines.append('</ol>')
+        
+        return '\n'.join(final_lines)
+    
+    @staticmethod
+    def _detailed_markdown_to_confluence(input_text: str) -> str:
+        """Detailed markdown to Confluence conversion for simple content."""
+        import re
+        
+        lines = input_text.split('\n')
+        output_lines = []
+        in_code_block = False
+        code_language = ""
+        code_content = []
+        in_ul_list = False
+        in_ol_list = False
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            
+            # Handle code blocks
+            if line.strip().startswith('```'):
+                if not in_code_block:
+                    # Start of code block
+                    in_code_block = True
+                    code_language = line.strip()[3:].strip()
+                    code_content = []
+                else:
+                    # End of code block
+                    in_code_block = False
+                    code_text = '\n'.join(code_content)
+                    # Use simpler code block format
+                    if code_language:
+                        output_lines.append(f'<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">{code_language}</ac:parameter><ac:plain-text-body><![CDATA[{code_text}]]></ac:plain-text-body></ac:structured-macro>')
+                    else:
+                        output_lines.append(f'<pre>{code_text}</pre>')
+                i += 1
+                continue
+            
+            if in_code_block:
+                code_content.append(line)
+                i += 1
+                continue
+            
+            # Handle headers
+            if line.strip().startswith('#'):
+                # Close any open lists
+                if in_ul_list:
+                    output_lines.append('</ul>')
+                    in_ul_list = False
+                if in_ol_list:
+                    output_lines.append('</ol>')
+                    in_ol_list = False
+                    
+                header_match = re.match(r'^(#{1,6})\s+(.*)', line.strip())
+                if header_match:
+                    level = len(header_match.group(1))
+                    text = header_match.group(2)
+                    output_lines.append(f'<h{level}>{text}</h{level}>')
+                i += 1
+                continue
+            
+            # Handle unordered lists
+            if re.match(r'^[\s]*[-*]\s+', line):
+                if not in_ul_list:
+                    if in_ol_list:
+                        output_lines.append('</ol>')
+                        in_ol_list = False
+                    output_lines.append('<ul>')
+                    in_ul_list = True
+                
+                # Extract list item content
+                list_item = re.sub(r'^[\s]*[-*]\s+', '', line)
+                list_item = ConfluenceFormatter._process_inline_formatting(list_item)
+                output_lines.append(f'<li>{list_item}</li>')
+                i += 1
+                continue
+            
+            # Handle ordered lists
+            if re.match(r'^[\s]*\d+\.\s+', line):
+                if not in_ol_list:
+                    if in_ul_list:
+                        output_lines.append('</ul>')
+                        in_ul_list = False
+                    output_lines.append('<ol>')
+                    in_ol_list = True
+                
+                # Extract list item content
+                list_item = re.sub(r'^[\s]*\d+\.\s+', '', line)
+                list_item = ConfluenceFormatter._process_inline_formatting(list_item)
+                output_lines.append(f'<li>{list_item}</li>')
+                i += 1
+                continue
+            
+            # If we're here and in a list, close it
+            if in_ul_list:
+                output_lines.append('</ul>')
+                in_ul_list = False
+            if in_ol_list:
+                output_lines.append('</ol>')
+                in_ol_list = False
+            
+            # Handle empty lines
+            if not line.strip():
+                output_lines.append('')
+                i += 1
+                continue
+            
+            # Handle regular paragraphs
+            processed_line = ConfluenceFormatter._process_inline_formatting(line)
+            output_lines.append(f'<p>{processed_line}</p>')
+            i += 1
+        
+        # Close any remaining open lists
+        if in_ul_list:
+            output_lines.append('</ul>')
+        if in_ol_list:
+            output_lines.append('</ol>')
+        
+        # Join lines and clean up
+        output = '\n'.join(output_lines)
+        
+        # Clean up multiple empty lines
+        output = re.sub(r'\n{3,}', '\n\n', output)
+        
+        return output.strip()
+    
+    @staticmethod
+    def _process_inline_formatting(text: str) -> str:
+        """Process inline formatting like bold, italic, code, links, images."""
+        output = text
+        
+        # Bold and Italic (order matters - do bold first to avoid conflicts)
+        output = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', output)  # Bold
+        output = re.sub(r'__(.*?)__', r'<strong>\1</strong>', output)      # Bold
+        output = re.sub(r'\*(.*?)\*', r'<em>\1</em>', output)             # Italic
+        output = re.sub(r'(?<!\*)\b_(.*?)_\b(?!\*)', r'<em>\1</em>', output)  # Italic (avoiding conflicts with bold)
+        
+        # Inline code
+        output = re.sub(r'`([^`]+)`', r'<code>\1</code>', output)
         
         # Links
-        output = re.sub(r"\[(.*?)\]\((.*?)\)", r'<a href="\2">\1</a>', output)
+        output = re.sub(r'\[(.*?)\]\((.*?)\)', r'<a href="\2">\1</a>', output)
         
         # Images
-        output = re.sub(r"!\[(.*?)\]\((.*?)\)", r'<ac:image><ri:url ri:value="\2"/></ac:image>', output)
-        
-        # Paragraphs - wrap remaining text in paragraph tags
-        paragraphs = output.split("\n\n")
-        processed_paragraphs = []
-        for p in paragraphs:
-            # Skip if the paragraph is already a tag
-            if p.strip().startswith("<") and not p.strip().startswith("<em>") and not p.strip().startswith("<strong>") and not p.strip().startswith("<code>"):
-                processed_paragraphs.append(p)
-            else:
-                # Wrap in paragraph tags
-                processed_paragraphs.append(f"<p>{p}</p>")
-                
-        output = "\n\n".join(processed_paragraphs)
-        
-        # Ensure correct XHTML structure with XML namespace for Confluence
-        output = f"<ac:structured-macro ac:name=\"html\"><ac:plain-text-body><![CDATA[{output}]]></ac:plain-text-body></ac:structured-macro>"
+        output = re.sub(r'!\[(.*?)\]\((.*?)\)', r'<ac:image><ri:url ri:value="\2"/></ac:image>', output)
         
         return output
     

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import re
 import sys
 from typing import Dict, List, Optional, Any, Union
 from urllib.parse import quote, urlparse, parse_qs, unquote
@@ -286,6 +287,37 @@ async def handle_list_prompts() -> list[types.Prompt]:
                 )
             ],
         ),
+        types.Prompt(
+            name="answer-confluence-question",
+            description="Answer a question about a specific Confluence page using its content",
+            arguments=[
+                types.PromptArgument(
+                    name="page_id",
+                    description="The ID of the Confluence page",
+                    required=False,
+                ),
+                types.PromptArgument(
+                    name="title",
+                    description="The title of the Confluence page",
+                    required=False,
+                ),
+                types.PromptArgument(
+                    name="space_key",
+                    description="The key of the Confluence space",
+                    required=False,
+                ),
+                types.PromptArgument(
+                    name="question",
+                    description="The question to answer about the page content",
+                    required=True,
+                ),
+                types.PromptArgument(
+                    name="context_depth",
+                    description="How much context to include (brief/detailed)",
+                    required=False,
+                )
+            ],
+        ),
     ]
 
 @server.get_prompt()
@@ -435,6 +467,72 @@ async def handle_get_prompt(
                 )
             ],
         )
+        
+    elif name == "answer-confluence-question":
+        question = arguments.get("question")
+        page_id = arguments.get("page_id")
+        title = arguments.get("title")
+        space_key = arguments.get("space_key")
+        context_depth = arguments.get("context_depth", "brief")
+        
+        if not question:
+            raise ValueError("Missing required argument: question")
+            
+        if not page_id and (not title or not space_key):
+            raise ValueError("Missing required arguments: either page_id or both title and space_key")
+        
+        try:
+            # Fetch the page content
+            page_data = None
+            if page_id:
+                page_data = await confluence_client.get_page(page_id, expand="body.storage,version,space")
+            else:
+                # Search by title and space key
+                cql = f'title = "{title}" AND space.key = "{space_key}"'
+                search_result = await confluence_client.search(cql, limit=1)
+                if search_result.get("results"):
+                    page_id = search_result["results"][0]["id"]
+                    page_data = await confluence_client.get_page(page_id, expand="body.storage,version,space")
+                else:
+                    raise ValueError("Page not found")
+            
+            page_title = page_data["title"]
+            content = page_data["body"]["storage"]["value"]
+            space_name = page_data.get("space", {}).get("name", "Unknown Space")
+            
+            # Convert to markdown for better readability
+            markdown_content = ConfluenceFormatter.confluence_to_markdown(content)
+            
+            # Determine context based on depth
+            if context_depth == "detailed":
+                context_text = markdown_content
+                context_instruction = "Use the full page content to provide a comprehensive answer."
+            else:
+                # Use first 1500 characters for brief context
+                context_text = markdown_content[:1500] + "..." if len(markdown_content) > 1500 else markdown_content
+                context_instruction = "Use the provided content excerpt to answer the question. Be concise but informative."
+            
+            return types.GetPromptResult(
+                description=f"Answer question about Confluence page '{page_title}'",
+                messages=[
+                    types.PromptMessage(
+                        role="user",
+                        content=types.TextContent(
+                            type="text",
+                            text=f"Please answer the following question based on the Confluence page content:\n\n"
+                                f"**Question:** {question}\n\n"
+                                f"**Page:** {page_title}\n"
+                                f"**Space:** {space_name}\n\n"
+                                f"**Instructions:** {context_instruction}\n\n"
+                                f"**Page Content:**\n{context_text}\n\n"
+                                f"Provide a clear, accurate answer based on the content above. If the content doesn't contain enough information to answer the question, say so."
+                        ),
+                    )
+                ],
+            )
+        except Exception as e:
+            logger.error(f"Error creating Confluence question prompt: {e}")
+            raise ValueError(f"Could not fetch Confluence page data: {str(e)}")
     else:
         raise ValueError(f"Unknown prompt: {name}")
 
@@ -500,16 +598,16 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="update-confluence-page",
-            description="Update an existing Confluence page",
+            description="Update an existing Confluence page. If version is not provided, the current version will be automatically fetched to prevent conflicts.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "page_id": {"type": "string"},
                     "title": {"type": "string"},
                     "content": {"type": "string"},
-                    "version": {"type": "number"},
+                    "version": {"type": "number", "description": "Version number of the page. If not provided, current version will be automatically fetched."},
                 },
-                "required": ["page_id", "title", "content", "version"],
+                "required": ["page_id", "title", "content"],
             },
         ),
         types.Tool(
@@ -523,6 +621,70 @@ async def handle_list_tools() -> list[types.Tool]:
                 },
                 "required": ["page_id", "comment"],
             },
+        ),
+        types.Tool(
+            name="get-confluence-page",
+            description="Get a Confluence page by ID or title. Use this tool to retrieve a specific page's content, optionally including comments and version history.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "The ID of the Confluence page"},
+                    "title": {"type": "string", "description": "The title of the Confluence page"},
+                    "space_key": {"type": "string", "description": "The key of the Confluence space"},
+                    "include_comments": {"type": "boolean", "default": False},
+                    "include_history": {"type": "boolean", "default": False}
+                },
+                "anyOf": [
+                    {"required": ["page_id"]},
+                    {"required": ["title", "space_key"]}
+                ]
+            }
+        ),
+        types.Tool(
+            name="search-confluence",
+            description="Search Confluence pages using CQL (Confluence Query Language). Use this to find pages matching specific criteria.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "CQL query string"
+                    },
+                    "space_key": {
+                        "type": "string",
+                        "description": "Limit search to a specific space"
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Maximum number of results to return"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        types.Tool(
+            name="ask-confluence-page",
+            description="Ask a question about a specific Confluence page content",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "page_id": {"type": "string", "description": "The ID of the Confluence page"},
+                    "title": {"type": "string", "description": "The title of the Confluence page"},
+                    "space_key": {"type": "string", "description": "The key of the Confluence space"},
+                    "question": {"type": "string", "description": "The question to ask about the page content"},
+                    "context_type": {
+                        "type": "string", 
+                        "enum": ["summary", "details", "specific"],
+                        "default": "summary",
+                        "description": "Type of context needed to answer the question"
+                    }
+                },
+                "anyOf": [
+                    {"required": ["page_id", "question"]},
+                    {"required": ["title", "space_key", "question"]}
+                ]
+            }
         ),
     ]
 
@@ -565,7 +727,14 @@ async def handle_call_tool(
                     type="text",
                     text=f"Created Jira issue {issue_key}",
                 ),
-                types.EmbeddedResource(uri=AnyUrl(build_jira_uri(issue_key)))
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_jira_uri(issue_key)),
+                        text=f"Created Jira issue: {issue_key}",
+                        mimeType="text/markdown"
+                    )
+                )
             ]
             
         elif name == "comment-jira-issue":
@@ -585,7 +754,14 @@ async def handle_call_tool(
                     type="text",
                     text=f"Added comment to Jira issue {issue_key}",
                 ),
-                types.EmbeddedResource(uri=AnyUrl(build_jira_uri(issue_key)))
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_jira_uri(issue_key)),
+                        text=f"Added comment to Jira issue: {issue_key}",
+                        mimeType="text/markdown"
+                    )
+                )
             ]
             
         elif name == "transition-jira-issue":
@@ -609,7 +785,14 @@ async def handle_call_tool(
                     type="text",
                     text=f"Transitioned Jira issue {issue_key} to status: {new_status}",
                 ),
-                types.EmbeddedResource(uri=AnyUrl(build_jira_uri(issue_key)))
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_jira_uri(issue_key)),
+                        text=f"Transitioned Jira issue {issue_key} to status: {new_status}",
+                        mimeType="text/markdown"
+                    )
+                )
             ]
         
         # Confluence operations
@@ -621,11 +804,47 @@ async def handle_call_tool(
             
             if not space_key or not title or not content:
                 raise ValueError("Missing required arguments: space_key, title, and content")
+            
+            # Convert content from markdown to Confluence storage format if needed
+            # Improved markdown detection
+            markdown_patterns = [
+                r'^#{1,6}\s+',           # Headers
+                r'\*\*(.*?)\*\*',        # Bold
+                r'\*(.*?)\*',            # Italic/emphasis  
+                r'`([^`]+)`',            # Inline code
+                r'```',                  # Code blocks
+                r'^[\s]*[-*]\s+',        # Unordered lists
+                r'^[\s]*\d+\.\s+',       # Ordered lists
+                r'\[.*?\]\(.*?\)',       # Links
+                r'!\[.*?\]\(.*?\)',      # Images
+            ]
+            
+            is_markdown = any(re.search(pattern, content, re.MULTILINE) for pattern in markdown_patterns)
+            
+            if is_markdown:
+                try:
+                    formatted_content = ConfluenceFormatter.markdown_to_confluence(content)
+                    logger.info("Successfully converted markdown content to Confluence storage format")
+                except Exception as e:
+                    logger.warning(f"Failed to convert markdown, using as plain HTML: {e}")
+                    # Fallback: wrap in simple paragraph tags with line breaks
+                    lines = content.split('\n')
+                    formatted_lines = [f"<p>{line}</p>" if line.strip() else "" for line in lines]
+                    formatted_content = '\n'.join(formatted_lines)
+            else:
+                # Check if it's already HTML/XML format
+                if content.strip().startswith('<') and content.strip().endswith('>'):
+                    formatted_content = content
+                    logger.info("Using content as-is (appears to be HTML/storage format)")
+                else:
+                    # Plain text - wrap in paragraph tags
+                    formatted_content = f"<p>{content}</p>"
+                    logger.info("Plain text detected - wrapped in paragraph tags")
                 
             result = await confluence_client.create_page(
                 space_key=space_key,
                 title=title,
-                content=content,
+                content=formatted_content,
                 parent_id=parent_id
             )
             
@@ -638,7 +857,14 @@ async def handle_call_tool(
                     type="text",
                     text=f"Created Confluence page: {title}",
                 ),
-                types.EmbeddedResource(uri=AnyUrl(build_confluence_uri(page_id, space_key)))
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_confluence_uri(page_id, space_key)),
+                        text=f"Created Confluence page: {title}",
+                        mimeType="text/markdown"
+                    )
+                )
             ]
             
         elif name == "update-confluence-page":
@@ -647,13 +873,58 @@ async def handle_call_tool(
             content = arguments.get("content")
             version = arguments.get("version")
             
-            if not page_id or not title or not content or version is None:
-                raise ValueError("Missing required arguments: page_id, title, content, and version")
+            if not page_id or not title or not content:
+                raise ValueError("Missing required arguments: page_id, title, and content")
+            
+            # If version is not provided, fetch the current version to prevent conflicts
+            if version is None:
+                try:
+                    page_data = await confluence_client.get_page(page_id, expand="version")
+                    version = page_data["version"]["number"]
+                    logger.info(f"Auto-fetched current version {version} for page {page_id}")
+                except Exception as e:
+                    raise ValueError(f"Could not fetch current page version: {str(e)}")
+            
+            # Convert content from markdown to Confluence storage format if needed
+            # Improved markdown detection
+            markdown_patterns = [
+                r'^#{1,6}\s+',           # Headers
+                r'\*\*(.*?)\*\*',        # Bold
+                r'\*(.*?)\*',            # Italic/emphasis  
+                r'`([^`]+)`',            # Inline code
+                r'```',                  # Code blocks
+                r'^[\s]*[-*]\s+',        # Unordered lists
+                r'^[\s]*\d+\.\s+',       # Ordered lists
+                r'\[.*?\]\(.*?\)',       # Links
+                r'!\[.*?\]\(.*?\)',      # Images
+            ]
+            
+            is_markdown = any(re.search(pattern, content, re.MULTILINE) for pattern in markdown_patterns)
+            
+            if is_markdown:
+                try:
+                    formatted_content = ConfluenceFormatter.markdown_to_confluence(content)
+                    logger.info("Successfully converted markdown content to Confluence storage format")
+                except Exception as e:
+                    logger.warning(f"Failed to convert markdown, using as plain HTML: {e}")
+                    # Fallback: wrap in simple paragraph tags with line breaks
+                    lines = content.split('\n')
+                    formatted_lines = [f"<p>{line}</p>" if line.strip() else "" for line in lines]
+                    formatted_content = '\n'.join(formatted_lines)
+            else:
+                # Check if it's already HTML/XML format
+                if content.strip().startswith('<') and content.strip().endswith('>'):
+                    formatted_content = content
+                    logger.info("Using content as-is (appears to be HTML/storage format)")
+                else:
+                    # Plain text - wrap in paragraph tags
+                    formatted_content = f"<p>{content}</p>"
+                    logger.info("Plain text detected - wrapped in paragraph tags")
                 
             result = await confluence_client.update_page(
                 page_id=page_id,
                 title=title,
-                content=content,
+                content=formatted_content,
                 version=version
             )
             
@@ -666,7 +937,14 @@ async def handle_call_tool(
                     type="text",
                     text=f"Updated Confluence page: {title} to version {version + 1}",
                 ),
-                types.EmbeddedResource(uri=AnyUrl(build_confluence_uri(page_id, space_key)))
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_confluence_uri(page_id, space_key)),
+                        text=f"Updated Confluence page: {title} to version {version + 1}",
+                        mimeType="text/markdown"
+                    )
+                )
             ]
             
         elif name == "comment-confluence-page":
@@ -690,7 +968,198 @@ async def handle_call_tool(
                     type="text",
                     text=f"Added comment to Confluence page",
                 ),
-                types.EmbeddedResource(uri=AnyUrl(build_confluence_uri(page_id, space_key)))
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_confluence_uri(page_id, space_key)),
+                        text=f"Comment added to page: {page_data.get('title', 'Unknown Title')}",
+                        mimeType="text/markdown"
+                    )
+                )
+            ]
+        elif name == "get-confluence-page":
+            page_id = arguments.get("page_id")
+            title = arguments.get("title")
+            space_key = arguments.get("space_key")
+            include_comments = arguments.get("include_comments", False)
+            include_history = arguments.get("include_history", False)
+            
+            if not page_id and (not title or not space_key):
+                raise ValueError("Missing required arguments: either page_id or both title and space_key")
+                
+            # Fetch the page data
+            page_data = None
+            if page_id:
+                page_data = await confluence_client.get_page(page_id, expand="body.storage,version,space")
+            else:
+                # Search by title and space key
+                cql = f'title = "{title}" AND space.key = "{space_key}"'
+                search_result = await confluence_client.search(cql, limit=1)
+                if search_result.get("results"):
+                    page_id = search_result["results"][0]["id"]
+                    page_data = await confluence_client.get_page(page_id, expand="body.storage,version,space")
+                else:
+                    raise ValueError("Page not found")
+            
+            # Format the response
+            title = page_data["title"]
+            content = page_data["body"]["storage"]["value"]
+            space_name = page_data.get("space", {}).get("name", "Unknown Space")
+            version = page_data["version"]["number"] if "version" in page_data else "Unknown"
+            
+            response = f"**Title:** {title}\n"
+            response += f"**Space:** {space_name}\n"
+            response += f"**Version:** {version}\n\n"
+            response += f"{ConfluenceFormatter.confluence_to_markdown(content)}"
+            
+            if include_comments:
+                # Add comments section
+                try:
+                    comments_data = await confluence_client.get_page_comments(page_id)
+                    if comments_data.get("results"):
+                        response += "\n\n**Comments:**\n"
+                        for comment in comments_data["results"]:
+                            author = comment.get("by", {}).get("displayName", "Unknown")
+                            body = comment.get("body", {}).get("storage", {}).get("value", "")
+                            created = comment.get("when", "")
+                            
+                            response += f"- **{author}** on {created}: {ConfluenceFormatter.confluence_to_markdown(body)}\n"
+                except Exception as e:
+                    logger.warning(f"Could not fetch comments: {e}")
+            
+            if include_history:
+                # Add history section
+                try:
+                    history_data = await confluence_client.get_page_history(page_id)
+                    if history_data.get("results"):
+                        response += "\n\n**History:**\n"
+                        for version_info in history_data["results"]:
+                            version_number = version_info.get("number", "Unknown")
+                            author = version_info.get("by", {}).get("displayName", "Unknown")
+                            date = version_info.get("when", "Unknown")
+                            
+                            response += f"- Version {version_number} by {author} on {date}\n"
+                except Exception as e:
+                    logger.warning(f"Could not fetch history: {e}")
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=response,
+                )
+            ]
+        elif name == "search-confluence":
+            query = arguments.get("query")
+            space_key = arguments.get("space_key")
+            max_results = arguments.get("max_results", 10)
+            
+            if not query:
+                raise ValueError("Missing required argument: query")
+                
+            # Build CQL query with proper content type specification
+            cql = query
+            
+            # If the query doesn't explicitly specify type, add "type = page"
+            if "type" not in cql.lower():
+                if cql.strip():
+                    cql = f"type = page AND ({cql})"
+                else:
+                    cql = "type = page"
+            
+            # Add space constraint if provided
+            if space_key:
+                cql += f' AND space.key = "{space_key}"'
+            
+            # Execute search
+            result = await confluence_client.search(cql, limit=max_results)
+            
+            if not result.get("results"):
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="No Confluence pages found matching the query.",
+                    )
+                ]
+            
+            # Format the response as a list of pages
+            response = "Confluence Pages Found:\n\n"
+            for page in result["results"]:
+                page_title = page["title"]
+                page_id = page["id"]
+                space_name = page.get("space", {}).get("name", "Unknown Space")
+                last_modified = page.get("lastModified", {}).get("when", "Unknown")
+                
+                response += f"- **{page_title}** (ID: {page_id})\n"
+                response += f"  Space: {space_name} | Last Modified: {last_modified}\n\n"
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=response,
+                )
+            ]
+        elif name == "ask-confluence-page":
+            page_id = arguments.get("page_id")
+            title = arguments.get("title")
+            space_key = arguments.get("space_key")
+            question = arguments.get("question")
+            context_type = arguments.get("context_type", "summary")
+            
+            if not question:
+                raise ValueError("Missing required argument: question")
+                
+            if not page_id and (not title or not space_key):
+                raise ValueError("Missing required arguments: either page_id or both title and space_key")
+                
+            # Fetch the page content
+            page_data = None
+            if page_id:
+                page_data = await confluence_client.get_page(page_id, expand="body.storage,version,space")
+            else:
+                # Search by title and space key
+                cql = f'title = "{title}" AND space.key = "{space_key}"'
+                search_result = await confluence_client.search(cql, limit=1)
+                if search_result.get("results"):
+                    page_id = search_result["results"][0]["id"]
+                    page_data = await confluence_client.get_page(page_id, expand="body.storage,version,space")
+                else:
+                    raise ValueError("Page not found")
+            
+            page_title = page_data["title"]
+            content = page_data["body"]["storage"]["value"]
+            space_name = page_data.get("space", {}).get("name", "Unknown Space")
+            
+            # Convert content to markdown for better readability
+            markdown_content = ConfluenceFormatter.confluence_to_markdown(content)
+            
+            # Extract context based on the context type
+            if context_type == "summary":
+                # Use first 1000 characters for summary context
+                context = markdown_content[:1000] + "..." if len(markdown_content) > 1000 else markdown_content
+            elif context_type == "details":
+                context = markdown_content
+            else:
+                # For specific context, use full content but note it's not specifically filtered
+                context = markdown_content
+            
+            # Create a response that answers the question based on the page content
+            response = f"**Question:** {question}\n\n"
+            response += f"**Page:** {page_title}\n"
+            response += f"**Space:** {space_name}\n\n"
+            response += f"**Answer based on page content:**\n\n"
+            response += f"Here is the relevant content from the Confluence page to help answer your question:\n\n"
+            response += f"**Context ({context_type}):**\n{context}\n\n"
+            
+            if context_type == "details":
+                response += f"**Full Content:**\n{markdown_content}"
+            else:
+                response += f"Please note: This is a {context_type} view. For complete details, use context_type='details'."
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=response,
+                )
             ]
         else:
             raise ValueError(f"Unknown tool: {name}")

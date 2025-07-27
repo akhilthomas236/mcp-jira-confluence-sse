@@ -85,13 +85,31 @@ class ConfluenceClient:
             return {}
         return response.json()
 
-    async def search(self, cql: str, start: int = 0, limit: int = 50) -> Dict[str, Any]:
+    async def search(self, cql: str, start: int = 0, limit: int = 50, sort_by: Optional[str] = None, sort_order: Optional[str] = None) -> Dict[str, Any]:
         """Search Confluence content using CQL."""
-        return await self.get("content/search", params={
+        params = {
             "cql": cql,
             "start": start,
             "limit": limit,
-        })
+            "expand": "space,version,body.storage"  # Add expand to get more details
+        }
+        
+        # Add orderBy to CQL if sorting is specified
+        if sort_by:
+            order = "DESC" if sort_order and sort_order.lower() == "desc" else "ASC"
+            # Map sort_by to valid Confluence fields
+            sort_field_map = {
+                "lastmodified": "lastModified",
+                "created": "created",
+                "title": "title"
+            }
+            field = sort_field_map.get(sort_by, sort_by)
+            
+            # Add ORDER BY clause to CQL if not already present
+            if "order by" not in cql.lower():
+                params["cql"] = f"{cql} ORDER BY {field} {order}"
+        
+        return await self.get("content/search", params=params)
 
     async def get_page(self, page_id: str, expand: Optional[str] = None) -> Dict[str, Any]:
         """Get a Confluence page by its ID."""
@@ -174,6 +192,14 @@ class ConfluenceClient:
             "expand": "body.storage"
         }
         return await self.get(f"content/{page_id}/child/comment", params=params)
+
+    async def get_page_comments(self, page_id: str) -> Dict[str, Any]:
+        """Get comments for a Confluence page (alias for get_comments)."""
+        return await self.get_comments(page_id)
+
+    async def get_page_history(self, page_id: str) -> Dict[str, Any]:
+        """Get version history for a Confluence page."""
+        return await self.get(f"content/{page_id}/version", params={"expand": "by"})
 
 
 # Instantiate a global client
