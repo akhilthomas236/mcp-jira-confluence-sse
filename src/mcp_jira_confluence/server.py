@@ -30,6 +30,62 @@ server = Server("mcp-jira-confluence")
 JIRA_SCHEME = "jira"
 CONFLUENCE_SCHEME = "confluence"
 
+# Helper functions for CQL query enhancement
+def build_smart_cql_query(user_query: str, space_key: Optional[str] = None) -> str:
+    """
+    Build a smart CQL query from user input, automatically adding proper syntax
+    for text searches, title searches, and other common patterns.
+    """
+    if not user_query or not user_query.strip():
+        cql = "type = page"
+    else:
+        user_query = user_query.strip()
+        
+        # Check if the query already contains CQL operators
+        has_cql_operators = any(op in user_query.lower() for op in [
+            ' and ', ' or ', ' not ', '=', '~', '!=', 'in (', 'not in (', 
+            'order by', 'type =', 'space.key', 'title ~', 'text ~', 
+            'creator =', 'lastmodified', 'created'
+        ])
+        
+        if has_cql_operators:
+            # User provided advanced CQL, use as-is but ensure type = page
+            cql = user_query
+            if "type" not in cql.lower():
+                cql = f"type = page AND ({cql})"
+        else:
+            # Smart enhancement for simple queries
+            cql_parts = []
+            
+            # Always ensure we're searching pages
+            cql_parts.append("type = page")
+            
+            # Detect if it looks like a title search vs content search
+            if len(user_query.split()) <= 4 and not any(char in user_query for char in ['"', "'"]):
+                # Short query - search both title and text with fuzzy matching
+                escaped_query = user_query.replace('"', '\\"')
+                title_search = f'title ~ "{escaped_query}"'
+                text_search = f'text ~ "{escaped_query}"'
+                cql_parts.append(f"({title_search} OR {text_search})")
+            else:
+                # Longer query or quoted - treat as content search
+                escaped_query = user_query.replace('"', '\\"')
+                if '"' in user_query or "'" in user_query:
+                    # User provided quotes, respect them but escape properly
+                    cql_parts.append(f'text ~ {user_query}')
+                else:
+                    # Add quotes for phrase search
+                    cql_parts.append(f'text ~ "{escaped_query}"')
+            
+            cql = " AND ".join(cql_parts)
+    
+    # Add space constraint if provided
+    if space_key:
+        if "space.key" not in cql.lower():
+            cql += f' AND space.key = "{space_key}"'
+    
+    return cql
+
 # Helper functions
 def build_jira_uri(issue_key: str) -> str:
     """Build a Jira issue URI."""
@@ -583,6 +639,69 @@ async def handle_list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="get-jira-issue",
+            description="Get detailed information about a specific Jira issue by its key",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "The Jira issue key (e.g., PROJ-123)"},
+                    "include_comments": {
+                        "type": "boolean",
+                        "description": "Include comments in the response (default: false)",
+                        "default": False
+                    },
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        types.Tool(
+            name="get-my-assigned-issues",
+            description="Get issues assigned to the current user, ordered by priority (highest first) and creation date (newest first)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "max_results": {
+                        "type": "integer", 
+                        "description": "Maximum number of issues to return (default: 25, max: 100)",
+                        "default": 25
+                    },
+                    "include_done": {
+                        "type": "boolean",
+                        "description": "Include completed/closed issues (default: false)",
+                        "default": False
+                    },
+                },
+                "required": [],
+            },
+        ),
+        types.Tool(
+            name="summarize-jira-issue",
+            description="Get a comprehensive summary of a Jira issue including comments, status history, and any Confluence page references",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "The Jira issue key (e.g., PROJ-123)"},
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        types.Tool(
+            name="extract-confluence-links",
+            description="Extract all Confluence page links and Git repository URLs referenced in a Jira issue (from description, comments, and remote links)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "issue_key": {"type": "string", "description": "The Jira issue key (e.g., PROJ-123)"},
+                    "include_git_urls": {
+                        "type": "boolean",
+                        "description": "Include Git repository URLs in the extraction (default: true)",
+                        "default": True
+                    },
+                },
+                "required": ["issue_key"],
+            },
+        ),
+        types.Tool(
             name="create-confluence-page",
             description="Create a new Confluence page",
             inputSchema={
@@ -642,13 +761,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="search-confluence",
-            description="Search Confluence pages using CQL (Confluence Query Language). Use this to find pages matching specific criteria.",
+            description="Search Confluence pages using CQL (Confluence Query Language). Simple queries are automatically enhanced with proper CQL syntax (e.g., 'API docs' becomes 'text ~ \"API docs\" OR title ~ \"API docs\"'). Advanced CQL is used as-is.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "CQL query string"
+                        "description": "Search query. Can be simple text (automatically enhanced) or advanced CQL syntax."
                     },
                     "space_key": {
                         "type": "string",
@@ -790,6 +909,358 @@ async def handle_call_tool(
                     resource=types.TextResourceContents(
                         uri=AnyUrl(build_jira_uri(issue_key)),
                         text=f"Transitioned Jira issue {issue_key} to status: {new_status}",
+                        mimeType="text/markdown"
+                    )
+                )
+            ]
+        
+        elif name == "get-jira-issue":
+            issue_key = arguments.get("issue_key")
+            include_comments = arguments.get("include_comments", False)
+            
+            if not issue_key:
+                raise ValueError("Missing required argument: issue_key")
+            
+            if include_comments:
+                # Use summarize_issue to get detailed info including comments
+                issue_data = await jira_client.summarize_issue(issue_key)
+            else:
+                # Use basic get_issue for faster response
+                issue_data = await jira_client.get_issue(issue_key)
+            
+            fields = issue_data.get("fields", {})
+            key = issue_data.get("key", issue_key)
+            
+            # Extract key information
+            summary = fields.get("summary", "No summary")
+            description = fields.get("description", "No description")
+            status = fields.get("status", {}).get("name", "Unknown")
+            priority = fields.get("priority", {}).get("name", "Unknown")
+            assignee = fields.get("assignee", {}).get("displayName", "Unassigned")
+            reporter = fields.get("reporter", {}).get("displayName", "Unknown")
+            created = fields.get("created", "Unknown")
+            updated = fields.get("updated", "Unknown")
+            issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+            due_date = fields.get("duedate", "No due date")
+            
+            # Format dates
+            for date_field in [("created", created), ("updated", updated)]:
+                if date_field[1] != "Unknown":
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(date_field[1].replace('Z', '+00:00'))
+                        if date_field[0] == "created":
+                            created = dt.strftime("%Y-%m-%d %H:%M")
+                        else:
+                            updated = dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        pass
+            
+            # Build response
+            response_text = f"# Jira Issue: {key}\n\n"
+            response_text += f"**Title**: {summary}\n"
+            response_text += f"**Status**: {status}\n"
+            response_text += f"**Priority**: {priority}\n"
+            response_text += f"**Type**: {issue_type}\n"
+            response_text += f"**Assignee**: {assignee}\n"
+            response_text += f"**Reporter**: {reporter}\n"
+            response_text += f"**Created**: {created}\n"
+            response_text += f"**Updated**: {updated}\n"
+            response_text += f"**Due Date**: {due_date}\n\n"
+            
+            if description and description.strip():
+                response_text += f"## Description\n{description}\n\n"
+            
+            if include_comments:
+                comments = fields.get("comment", {}).get("comments", [])
+                if comments:
+                    response_text += f"## Comments ({len(comments)})\n"
+                    for i, comment in enumerate(comments[-3:], 1):  # Show last 3 comments
+                        author = comment.get("author", {}).get("displayName", "Unknown")
+                        created_date = comment.get("created", "")
+                        body = comment.get("body", "")
+                        
+                        if created_date:
+                            try:
+                                from datetime import datetime
+                                dt = datetime.fromisoformat(created_date.replace('Z', '+00:00'))
+                                created_date = dt.strftime("%Y-%m-%d %H:%M")
+                            except:
+                                pass
+                        
+                        response_text += f"### Comment {i} - {author} ({created_date})\n"
+                        response_text += f"{body}\n\n"
+                    
+                    if len(comments) > 3:
+                        response_text += f"*... and {len(comments) - 3} more comments*\n\n"
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=response_text,
+                ),
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_jira_uri(issue_key)),
+                        text=response_text,
+                        mimeType="text/markdown"
+                    )
+                )
+            ]
+        
+        elif name == "get-my-assigned-issues":
+            max_results = arguments.get("max_results", 25)
+            include_done = arguments.get("include_done", False)
+            
+            # Validate max_results
+            if max_results > 100:
+                max_results = 100
+            elif max_results < 1:
+                max_results = 25
+                
+            result = await jira_client.get_my_assigned_issues(
+                max_results=max_results,
+                include_done=include_done
+            )
+            
+            issues = result.get("issues", [])
+            total = result.get("total", 0)
+            
+            if not issues:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="No issues assigned to you were found.",
+                    )
+                ]
+            
+            # Format the response
+            response_text = f"Found {len(issues)} out of {total} issues assigned to you:\n\n"
+            
+            for issue in issues:
+                fields = issue.get("fields", {})
+                key = issue.get("key", "Unknown")
+                summary = fields.get("summary", "No summary")
+                status = fields.get("status", {}).get("name", "Unknown")
+                priority = fields.get("priority", {}).get("name", "Unknown")
+                created = fields.get("created", "Unknown")
+                due_date = fields.get("duedate", "No due date")
+                issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+                
+                # Format dates nicely
+                if created != "Unknown":
+                    try:
+                        from datetime import datetime
+                        created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                        created = created_dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        pass
+                
+                response_text += f"**{key}**: {summary}\n"
+                response_text += f"  - Status: {status}\n"
+                response_text += f"  - Priority: {priority}\n"
+                response_text += f"  - Type: {issue_type}\n"
+                response_text += f"  - Created: {created}\n"
+                response_text += f"  - Due Date: {due_date}\n\n"
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=response_text,
+                ),
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl("jira://my-assigned-issues"),
+                        text=response_text,
+                        mimeType="text/markdown"
+                    )
+                )
+            ]
+        
+        elif name == "summarize-jira-issue":
+            issue_key = arguments.get("issue_key")
+            
+            if not issue_key:
+                raise ValueError("Missing required argument: issue_key")
+            
+            # Get detailed issue information
+            issue_data = await jira_client.summarize_issue(issue_key)
+            
+            fields = issue_data.get("fields", {})
+            key = issue_data.get("key", issue_key)
+            
+            # Extract key information
+            summary = fields.get("summary", "No summary")
+            description = fields.get("description", "No description")
+            status = fields.get("status", {}).get("name", "Unknown")
+            priority = fields.get("priority", {}).get("name", "Unknown")
+            assignee = fields.get("assignee", {}).get("displayName", "Unassigned")
+            reporter = fields.get("reporter", {}).get("displayName", "Unknown")
+            created = fields.get("created", "Unknown")
+            updated = fields.get("updated", "Unknown")
+            issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+            due_date = fields.get("duedate", "No due date")
+            
+            # Format dates
+            for date_field in [("created", created), ("updated", updated)]:
+                if date_field[1] != "Unknown":
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(date_field[1].replace('Z', '+00:00'))
+                        if date_field[0] == "created":
+                            created = dt.strftime("%Y-%m-%d %H:%M")
+                        else:
+                            updated = dt.strftime("%Y-%m-%d %H:%M")
+                    except:
+                        pass
+            
+            # Get comments
+            comments = fields.get("comment", {}).get("comments", [])
+            
+            # Get Confluence links
+            confluence_links = issue_data.get("remoteLinks", [])
+            confluence_refs = []
+            for link in confluence_links:
+                if "confluence" in link.get("object", {}).get("url", "").lower():
+                    confluence_refs.append({
+                        "title": link.get("object", {}).get("title", "Confluence Page"),
+                        "url": link.get("object", {}).get("url", ""),
+                        "summary": link.get("object", {}).get("summary", "")
+                    })
+            
+            # Build comprehensive summary
+            summary_text = f"# Jira Issue Summary: {key}\n\n"
+            summary_text += f"**Title**: {summary}\n\n"
+            summary_text += f"**Status**: {status}\n"
+            summary_text += f"**Priority**: {priority}\n"
+            summary_text += f"**Type**: {issue_type}\n"
+            summary_text += f"**Assignee**: {assignee}\n"
+            summary_text += f"**Reporter**: {reporter}\n"
+            summary_text += f"**Created**: {created}\n"
+            summary_text += f"**Updated**: {updated}\n"
+            summary_text += f"**Due Date**: {due_date}\n\n"
+            
+            if description and description.strip():
+                summary_text += f"## Description\n{description}\n\n"
+            
+            if confluence_refs:
+                summary_text += f"## Confluence References\n"
+                for ref in confluence_refs:
+                    summary_text += f"- [{ref['title']}]({ref['url']})"
+                    if ref['summary']:
+                        summary_text += f" - {ref['summary']}"
+                    summary_text += "\n"
+                summary_text += "\n"
+            
+            if comments:
+                summary_text += f"## Comments ({len(comments)})\n"
+                for i, comment in enumerate(comments[-5:], 1):  # Show last 5 comments
+                    author = comment.get("author", {}).get("displayName", "Unknown")
+                    created_date = comment.get("created", "")
+                    body = comment.get("body", "")
+                    
+                    if created_date:
+                        try:
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(created_date.replace('Z', '+00:00'))
+                            created_date = dt.strftime("%Y-%m-%d %H:%M")
+                        except:
+                            pass
+                    
+                    summary_text += f"### Comment {i} - {author} ({created_date})\n"
+                    summary_text += f"{body}\n\n"
+                
+                if len(comments) > 5:
+                    summary_text += f"*... and {len(comments) - 5} more comments*\n\n"
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=summary_text,
+                ),
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_jira_uri(issue_key)),
+                        text=summary_text,
+                        mimeType="text/markdown"
+                    )
+                )
+            ]
+        
+        elif name == "extract-confluence-links":
+            issue_key = arguments.get("issue_key")
+            include_git_urls = arguments.get("include_git_urls", True)
+            
+            if not issue_key:
+                raise ValueError("Missing required argument: issue_key")
+            
+            # Use the new method that extracts both Confluence and Git links
+            all_links = await jira_client.extract_confluence_and_git_links(issue_key, include_git_urls)
+            
+            if not all_links:
+                no_links_text = "No Confluence links"
+                if include_git_urls:
+                    no_links_text += " or Git repository URLs"
+                no_links_text += f" found in Jira issue {issue_key}."
+                
+                return [
+                    types.TextContent(
+                        type="text",
+                        text=no_links_text,
+                    )
+                ]
+            
+            # Separate links by category
+            confluence_links = [link for link in all_links if link['category'] == 'confluence']
+            git_links = [link for link in all_links if link['category'] == 'git']
+            
+            # Format the response
+            response_text = f"# Links Found in {issue_key}\n\n"
+            
+            if confluence_links:
+                response_text += f"## Confluence Links ({len(confluence_links)})\n\n"
+                for i, link in enumerate(confluence_links, 1):
+                    response_text += f"### {i}. {link['title']}\n"
+                    response_text += f"**URL**: {link['url']}\n"
+                    response_text += f"**Source**: {link['type'].replace('_', ' ').title()}\n"
+                    if link['summary']:
+                        response_text += f"**Summary**: {link['summary']}\n"
+                    response_text += "\n"
+            
+            if git_links and include_git_urls:
+                response_text += f"## Git Repository Links ({len(git_links)})\n\n"
+                for i, link in enumerate(git_links, 1):
+                    response_text += f"### {i}. {link['title']}\n"
+                    response_text += f"**URL**: {link['url']}\n"
+                    response_text += f"**Source**: {link['type'].replace('_', ' ').title()}\n"
+                    if link['summary']:
+                        response_text += f"**Summary**: {link['summary']}\n"
+                    response_text += "\n"
+            
+            total_found = len(all_links)
+            summary_text = f"Found {total_found} link(s) total"
+            if confluence_links and git_links:
+                summary_text += f" ({len(confluence_links)} Confluence, {len(git_links)} Git)"
+            elif confluence_links:
+                summary_text += f" (all Confluence)"
+            elif git_links:
+                summary_text += f" (all Git repositories)"
+            
+            response_text = response_text.replace("# Links Found in", f"# Links Found in {issue_key}\n\n*{summary_text}*\n\n#")
+            
+            return [
+                types.TextContent(
+                    type="text",
+                    text=response_text,
+                ),
+                types.EmbeddedResource(
+                    type="resource",
+                    resource=types.TextResourceContents(
+                        uri=AnyUrl(build_jira_uri(issue_key)),
+                        text=response_text,
                         mimeType="text/markdown"
                     )
                 )
@@ -1056,19 +1527,8 @@ async def handle_call_tool(
             if not query:
                 raise ValueError("Missing required argument: query")
                 
-            # Build CQL query with proper content type specification
-            cql = query
-            
-            # If the query doesn't explicitly specify type, add "type = page"
-            if "type" not in cql.lower():
-                if cql.strip():
-                    cql = f"type = page AND ({cql})"
-                else:
-                    cql = "type = page"
-            
-            # Add space constraint if provided
-            if space_key:
-                cql += f' AND space.key = "{space_key}"'
+            # Use smart CQL query builder to enhance the user's query
+            cql = build_smart_cql_query(query, space_key)
             
             # Execute search
             result = await confluence_client.search(cql, limit=max_results)
@@ -1077,12 +1537,13 @@ async def handle_call_tool(
                 return [
                     types.TextContent(
                         type="text",
-                        text="No Confluence pages found matching the query.",
+                        text=f"No Confluence pages found matching the query.\n\n**Enhanced CQL used:** `{cql}`",
                     )
                 ]
             
             # Format the response as a list of pages
-            response = "Confluence Pages Found:\n\n"
+            response = f"**Enhanced CQL Query:** `{cql}`\n\n"
+            response += f"**Found {len(result['results'])} page(s):**\n\n"
             for page in result["results"]:
                 page_title = page["title"]
                 page_id = page["id"]
@@ -1197,7 +1658,7 @@ async def run_server():
                 write_stream,
                 InitializationOptions(
                     server_name="mcp-jira-confluence",
-                    server_version="0.1.0",
+                    server_version="0.2.3",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},

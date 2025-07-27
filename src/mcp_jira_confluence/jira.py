@@ -136,7 +136,251 @@ class JiraClient:
     async def get_project_versions(self, project_key: str) -> List[Dict[str, Any]]:
         """Get all versions for a project."""
         return await self.get(f"project/{project_key}/versions")
-
+    
+    async def get_current_user(self) -> Dict[str, Any]:
+        """Get information about the current user."""
+        return await self.get("myself")
+    
+    async def get_my_assigned_issues(self, max_results: int = 50, include_done: bool = False) -> Dict[str, Any]:
+        """Get issues assigned to the current user, ordered by priority and date."""
+        # Build JQL query for assigned issues
+        jql_parts = ["assignee = currentUser()"]
+        
+        if not include_done:
+            jql_parts.append('status not in ("Done", "Closed", "Resolved")')
+        
+        # Order by priority (highest first), then by created date (newest first)
+        jql = " AND ".join(jql_parts) + " ORDER BY priority DESC, created DESC"
+        
+        fields = "summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,duedate"
+        return await self.get("search", params={
+            "jql": jql,
+            "startAt": 0,
+            "maxResults": max_results,
+            "fields": fields
+        })
+    
+    async def summarize_issue(self, issue_key: str) -> Dict[str, Any]:
+        """Get detailed information about an issue for summarization including comments and links."""
+        # Get issue with expanded fields including comments
+        issue_data = await self.get(f"issue/{issue_key}", params={
+            "fields": "summary,description,status,assignee,reporter,labels,priority,created,updated,issuetype,duedate,comment",
+            "expand": "changelog"
+        })
+        
+        # Get remote links (including Confluence links)
+        try:
+            remote_links = await self.get(f"issue/{issue_key}/remotelink")
+        except:
+            remote_links = []
+        
+        # Combine issue data with remote links for easier processing
+        issue_data["remoteLinks"] = remote_links
+        
+        return issue_data
+        
+    async def extract_confluence_links(self, issue_key: str) -> List[Dict[str, Any]]:
+        """Extract Confluence links from an issue's description, comments, and remote links."""
+        confluence_links = []
+        
+        try:
+            # Get issue data with comments and remote links
+            issue_data = await self.summarize_issue(issue_key)
+            
+            # Check remote links first (most reliable)
+            if "remoteLinks" in issue_data:
+                for link in issue_data["remoteLinks"]:
+                    if link.get("object", {}).get("url", "").find("confluence") != -1:
+                        confluence_links.append({
+                            "type": "remote_link",
+                            "title": link.get("object", {}).get("title", ""),
+                            "url": link.get("object", {}).get("url", ""),
+                            "summary": link.get("object", {}).get("summary", "")
+                        })
+            
+            # Check description for Confluence URLs
+            description = issue_data.get("fields", {}).get("description", "") or ""
+            confluence_urls = self._extract_confluence_urls_from_text(description)
+            for url in confluence_urls:
+                confluence_links.append({
+                    "type": "description_link",
+                    "title": "Confluence Page",
+                    "url": url,
+                    "summary": "Found in issue description"
+                })
+            
+            # Check comments for Confluence URLs
+            comments = issue_data.get("fields", {}).get("comment", {}).get("comments", [])
+            for comment in comments:
+                comment_body = comment.get("body", "") or ""
+                confluence_urls = self._extract_confluence_urls_from_text(comment_body)
+                for url in confluence_urls:
+                    confluence_links.append({
+                        "type": "comment_link",
+                        "title": "Confluence Page",
+                        "url": url,
+                        "summary": f"Found in comment by {comment.get('author', {}).get('displayName', 'Unknown')}"
+                    })
+            
+        except Exception as e:
+            logger.warning(f"Error extracting Confluence links from {issue_key}: {e}")
+        
+        return confluence_links
+    
+    def _extract_confluence_urls_from_text(self, text: str) -> List[str]:
+        """Extract Confluence URLs from text using regex."""
+        import re
+        
+        if not text:
+            return []
+        
+        # Common Confluence URL patterns
+        patterns = [
+            r'https?://[^/\s]+/confluence/[^\s\)]+',  # Standard Confluence URLs
+            r'https?://[^/\s]+/wiki/[^\s\)]+',        # Wiki-style URLs
+            r'https?://[^/\s]+/display/[^\s\)]+',     # Display URLs
+            r'https?://[^\.]+\.atlassian\.net/wiki/[^\s\)]+',  # Atlassian cloud
+        ]
+        
+        urls = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            urls.extend(matches)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_urls = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        return unique_urls
+    
+    def _extract_git_urls_from_text(self, text: str) -> List[str]:
+        """Extract Git repository URLs from text using regex."""
+        import re
+        
+        if not text:
+            return []
+        
+        # Common Git repository URL patterns
+        patterns = [
+            r'https?://github\.com/[^/\s]+/[^/\s]+(?:\.git)?(?:/[^\s\)]*)?',  # GitHub
+            r'https?://gitlab\.com/[^/\s]+/[^/\s]+(?:\.git)?(?:/[^\s\)]*)?',  # GitLab.com
+            r'https?://bitbucket\.org/[^/\s]+/[^/\s]+(?:\.git)?(?:/[^\s\)]*)?',  # Bitbucket
+            r'https?://[^/\s]+/gitlab/[^/\s]+/[^/\s]+(?:\.git)?(?:/[^\s\)]*)?',  # Self-hosted GitLab
+            r'https?://[^/\s]+/bitbucket/[^/\s]+/[^/\s]+(?:\.git)?(?:/[^\s\)]*)?',  # Self-hosted Bitbucket
+            r'git@[^:\s]+:[^/\s]+/[^/\s]+(?:\.git)?',  # SSH URLs
+            r'https?://[^/\s]+\.visualstudio\.com/[^/\s]+/_git/[^/\s]+',  # Azure DevOps
+            r'https?://dev\.azure\.com/[^/\s]+/[^/\s]+/_git/[^/\s]+',  # Azure DevOps new format
+            r'https?://[^/\s]+/git/[^/\s]+/[^/\s]+(?:\.git)?(?:/[^\s\)]*)?',  # Generic Git hosting
+        ]
+        
+        urls = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            urls.extend(matches)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_urls = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        return unique_urls
+    
+    async def extract_confluence_and_git_links(self, issue_key: str, include_git_urls: bool = True) -> List[Dict[str, Any]]:
+        """Extract both Confluence and Git links from an issue's description, comments, and remote links."""
+        all_links = []
+        
+        try:
+            # Get issue data with comments and remote links
+            issue_data = await self.summarize_issue(issue_key)
+            
+            # Check remote links first (most reliable)
+            if "remoteLinks" in issue_data:
+                for link in issue_data["remoteLinks"]:
+                    url = link.get("object", {}).get("url", "")
+                    title = link.get("object", {}).get("title", "")
+                    summary = link.get("object", {}).get("summary", "")
+                    
+                    # Check if it's a Confluence link
+                    if url.find("confluence") != -1 or url.find("wiki") != -1:
+                        all_links.append({
+                            "type": "remote_link",
+                            "category": "confluence",
+                            "title": title or "Confluence Page",
+                            "url": url,
+                            "summary": summary
+                        })
+                    # Check if it's a Git repository link
+                    elif include_git_urls and any(pattern in url.lower() for pattern in ['github', 'gitlab', 'bitbucket', 'git', '_git']):
+                        all_links.append({
+                            "type": "remote_link", 
+                            "category": "git",
+                            "title": title or "Git Repository",
+                            "url": url,
+                            "summary": summary
+                        })
+            
+            # Check description for Confluence and Git URLs
+            description = issue_data.get("fields", {}).get("description", "") or ""
+            
+            confluence_urls = self._extract_confluence_urls_from_text(description)
+            for url in confluence_urls:
+                all_links.append({
+                    "type": "description_link",
+                    "category": "confluence",
+                    "title": "Confluence Page",
+                    "url": url,
+                    "summary": "Found in issue description"
+                })
+            
+            if include_git_urls:
+                git_urls = self._extract_git_urls_from_text(description)
+                for url in git_urls:
+                    all_links.append({
+                        "type": "description_link",
+                        "category": "git", 
+                        "title": "Git Repository",
+                        "url": url,
+                        "summary": "Found in issue description"
+                    })
+            
+            # Check comments for Confluence and Git URLs
+            comments = issue_data.get("fields", {}).get("comment", {}).get("comments", [])
+            for comment in comments:
+                comment_body = comment.get("body", "") or ""
+                author = comment.get('author', {}).get('displayName', 'Unknown')
+                
+                confluence_urls = self._extract_confluence_urls_from_text(comment_body)
+                for url in confluence_urls:
+                    all_links.append({
+                        "type": "comment_link",
+                        "category": "confluence",
+                        "title": "Confluence Page",
+                        "url": url,
+                        "summary": f"Found in comment by {author}"
+                    })
+                
+                if include_git_urls:
+                    git_urls = self._extract_git_urls_from_text(comment_body)
+                    for url in git_urls:
+                        all_links.append({
+                            "type": "comment_link",
+                            "category": "git",
+                            "title": "Git Repository", 
+                            "url": url,
+                            "summary": f"Found in comment by {author}"
+                        })
+            
+        except Exception as e:
+            logger.warning(f"Error extracting links from {issue_key}: {e}")
+        
+        return all_links
 
 # Instantiate a global client
 jira_client = JiraClient()

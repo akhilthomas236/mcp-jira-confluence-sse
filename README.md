@@ -10,6 +10,9 @@ A Model Context Protocol (MCP) server that integrates with Atlassian's Jira and 
   - Create new issues
   - Add comments to issues
   - Transition issues between statuses
+  - **Get assigned issues** - Retrieve your assigned tickets ordered by priority and date
+  - **Summarize issues** - Get comprehensive issue summaries with comments and history
+  - **Extract Confluence and Git links** - Find all Confluence page references and Git repository URLs in issues
 
 - **Confluence Integration**
   - List recent pages
@@ -142,6 +145,10 @@ The server exposes the following types of resources:
 - **`create-jira-issue`**: Create a new Jira issue
 - **`comment-jira-issue`**: Add a comment to an issue
 - **`transition-jira-issue`**: Change an issue's status
+- **`get-jira-issue`**: Get detailed information about a specific Jira issue
+- **`get-my-assigned-issues`**: Get issues assigned to you, ordered by priority and date
+- **`summarize-jira-issue`**: Get comprehensive issue summary with comments and history
+- **`extract-confluence-links`**: Find all Confluence and Git repository links in an issue
 
 #### Confluence Tools
 - **`create-confluence-page`**: Create a new Confluence page
@@ -152,6 +159,81 @@ The server exposes the following types of resources:
 - **`ask-confluence-page`**: Ask questions about page content
 
 ### Usage Examples
+
+#### Getting Your Assigned Issues
+```
+Get issues assigned to you ordered by priority (highest first) and creation date (newest first):
+
+Default (25 issues, exclude completed):
+- No parameters needed
+
+Custom parameters:
+- max_results: 50 (max: 100)
+- include_done: true (includes closed/resolved issues)
+
+The tool returns issues with:
+- Issue key, summary, status, priority
+- Issue type, creation date, due date
+- Formatted for easy reading
+```
+
+#### Getting a Specific Jira Issue
+```
+Get detailed information about any Jira issue by its key:
+
+Basic issue info:
+- issue_key: "PROJ-123" (required)
+- include_comments: false (default)
+
+With comments:
+- issue_key: "PROJ-123"
+- include_comments: true (includes last 3 comments)
+
+Returns:
+- Complete issue details (status, priority, assignee, dates)
+- Full description
+- Optional recent comments
+- Formatted for easy reading
+```
+
+#### Summarizing a Jira Issue
+```
+Get comprehensive issue information including:
+- Basic details (status, priority, assignee, dates)
+- Full description
+- Recent comments (last 5)
+- Confluence page references
+- Status history
+
+Parameters:
+- issue_key: "PROJ-123" (required)
+
+Returns formatted markdown summary perfect for AI analysis.
+```
+
+#### Extracting Links from Issues
+```
+Find all Confluence and Git repository links in a Jira issue from:
+- Issue description text
+- Comments from all users  
+- Remote links attached to the issue
+
+Parameters:
+- issue_key: "PROJ-123" (required)
+- include_git_urls: true (default, set to false to exclude Git links)
+
+Supported Git platforms:
+- GitHub, GitLab, Bitbucket (cloud and self-hosted)
+- Azure DevOps / Visual Studio Team Services
+- Generic Git hosting platforms
+- SSH Git URLs (git@server:org/repo.git)
+
+Returns:
+- Confluence page links with titles and context
+- Git repository URLs with source location
+- Organized by category (Confluence vs Git)
+- Source information (description, comment, remote link)
+```
 
 #### Getting a Confluence Page
 ```
@@ -310,6 +392,76 @@ npx @modelcontextprotocol/inspector uv --directory /Users/annmariyajoshy/vibecod
 Upon launching, the Inspector will display a URL that you can access in your browser to begin debugging.
 
 ## Changelog
+
+### Version 0.2.4 (2025-07-27)
+
+**Enhanced Confluence Search:**
+
+- **Smart CQL Query Builder** - Automatically enhances simple search queries with proper CQL syntax:
+  - **Simple text queries** - "API docs" becomes `(title ~ "API docs" OR text ~ "API docs")`
+  - **Phrase detection** - Longer queries become `text ~ "your search phrase"`
+  - **Advanced CQL preservation** - Complex queries with operators (AND, OR, ~, =) are used as-is
+  - **Space integration** - Automatically adds space constraints when specified
+  - **Query transparency** - Shows the enhanced CQL query in search results
+
+**Technical Improvements:**
+
+- Added `build_smart_cql_query()` function for intelligent query enhancement
+- Enhanced search-confluence tool description to explain automatic query enhancement
+- Better user experience with query transformation visibility
+- Improved search accuracy for both novice and advanced users
+
+### Version 0.2.3 (2025-07-27)
+
+**Enhanced Link Extraction:**
+
+- **Enhanced `extract-confluence-links`** - Now extracts both Confluence pages AND Git repository URLs:
+  - **Git Repository Support** - Detects URLs from GitHub, GitLab, Bitbucket, Azure DevOps, and other Git platforms
+  - **Smart Pattern Matching** - Uses regex patterns to identify repository URLs in issue descriptions, comments, and remote links
+  - **Comprehensive Coverage** - Scans all issue text fields for both Confluence and Git references
+  - **Rich Output** - Returns organized lists of both Confluence pages and Git repositories with context
+
+**Technical Improvements:**
+
+- Added `_extract_git_urls_from_text()` method with support for major Git platforms
+- Enhanced URL extraction patterns for better accuracy
+- Improved tool description and documentation
+- Better organization of extracted links by type (Confluence vs Git)
+
+### Version 0.2.2 (2025-07-27)
+
+**New Jira Tools:**
+
+- **`get-my-assigned-issues`** - Get issues assigned to you ordered by priority (highest first) and creation date (newest first)
+  - Configurable max results (default: 25, max: 100)
+  - Option to include completed/closed issues
+  - Rich formatting with status, priority, type, dates
+- **`summarize-jira-issue`** - Comprehensive issue analysis including:
+  - Complete issue details (status, priority, assignee, dates)
+  - Full description and recent comments (last 5)
+  - Confluence page references from remote links
+  - Formatted as markdown for easy AI processing
+- **`extract-confluence-links`** - Find all Confluence page references in issues:
+  - Scans issue description, all comments, and remote links
+  - Supports multiple Confluence URL patterns (atlassian.net, custom domains)
+  - Returns link titles, URLs, and source context
+
+**Technical Enhancements:**
+
+- Added `get_current_user()` API method for user context
+- Enhanced JQL queries with proper field selection and ordering
+- Robust URL extraction with regex pattern matching
+- Improved error handling for missing or invalid issues
+- Better date formatting for human readability
+
+### Version 0.2.1 (2025-07-27)
+
+**Formatting Fixes:**
+
+- **Fixed 400 Bad Request errors** with complex markdown formatting in Confluence pages
+- **Implemented intelligent complexity detection** - automatically chooses conversion strategy
+- **Added robust error handling** with graceful fallbacks for conversion failures
+- **Enhanced list processing** with proper HTML grouping and nesting
 
 ### Version 0.2.0 (2025-07-27)
 
