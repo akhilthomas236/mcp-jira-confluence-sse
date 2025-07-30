@@ -12,6 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
+from mcp.server import NotificationOptions
 
 from .jira import jira_client
 from .confluence import confluence_client
@@ -124,15 +125,97 @@ async def root():
         "endpoints": {
             "health": "/health",
             "sse": "/sse",
+            "mcp": "/mcp",
             "metrics": "/metrics"
         }
     }
 
-@app.post("/sse")
+@app.post("/")
+async def root_fallback(request: Request):
+    """Fallback for MCP clients that incorrectly POST to root."""
+    logger.warning("MCP client attempted to POST to root endpoint, redirecting to /mcp")
+    
+    # Try to process as MCP request
+    try:
+        request_data = await request.json()
+        logger.debug(f"Fallback: Processing MCP request: {request_data}")
+        
+        # Extract authentication from headers
+        auth_header = request.headers.get("authorization")
+        jira_token = request.headers.get("x-jira-token")
+        confluence_token = request.headers.get("x-confluence-token")
+        
+        # Override client configurations with tokens from request
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]  # Remove "Bearer " prefix
+            # Use the same token for both services if no specific tokens provided
+            if not jira_token:
+                jira_token = token
+            if not confluence_token:
+                confluence_token = token
+        
+        # Process the MCP request with authentication context
+        response = await process_mcp_request(request_data, jira_token, confluence_token)
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error processing fallback MCP request: {e}")
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32603,
+                "message": "Internal error",
+                "data": f"Fallback handler error: {str(e)}"
+            }
+        }
+
+@app.api_route("/sse", methods=["GET", "POST"])
 async def sse_endpoint(request: Request) -> StreamingResponse:
     """SSE endpoint for MCP communication."""
     
-    # Extract authentication from headers
+    # Log the request details for debugging
+    logger.info(f"SSE endpoint called with method: {request.method}")
+    logger.info(f"Request headers: {dict(request.headers)}")
+    
+    if request.method == "POST":
+        # Handle POST requests for sending MCP requests
+        try:
+            request_data = await request.json()
+            logger.info(f"Received POST request data: {request_data}")
+            
+            # Extract authentication from headers
+            auth_header = request.headers.get("authorization")
+            jira_token = request.headers.get("x-jira-token")
+            confluence_token = request.headers.get("x-confluence-token")
+            
+            # Override client configurations with tokens from request
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header[7:]  # Remove "Bearer " prefix
+                # Use the same token for both services if no specific tokens provided
+                if not jira_token:
+                    jira_token = token
+                if not confluence_token:
+                    confluence_token = token
+            
+            # Process the MCP request with authentication context
+            response = await process_mcp_request(request_data, jira_token, confluence_token)
+            logger.info(f"Sending POST response: {response}")
+            
+            return response
+        except Exception as e:
+            logger.error(f"Error processing POST request to SSE endpoint: {e}")
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": str(e)
+                }
+            }
+    
+    # Extract authentication from headers for GET (SSE stream)
     auth_header = request.headers.get("authorization")
     jira_token = request.headers.get("x-jira-token")
     confluence_token = request.headers.get("x-confluence-token")
@@ -171,17 +254,36 @@ async def sse_endpoint(request: Request) -> StreamingResponse:
         logger.info(f"New SSE client connected. Total clients: {len(sse_transport.connected_clients)}")
         
         try:
-            # Send initialization message
+            # Get tools list for initialization
+            from . import server as server_module
+            try:
+                tool_list = await server_module.handle_list_tools()
+                tools = []
+                for tool in tool_list:
+                    tools.append({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "inputSchema": tool.inputSchema
+                    })
+            except Exception as e:
+                logger.error(f"Error getting tools for initialization: {e}")
+                tools = []
+            
+            # Send initialization message with tools included
             init_message = {
                 "jsonrpc": "2.0",
                 "method": "notifications/initialized",
                 "params": {
                     "protocolVersion": "2024-11-05",
-                    "capabilities": server.get_capabilities().model_dump(),
+                    "capabilities": server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ).model_dump(),
                     "serverInfo": {
                         "name": "mcp-jira-confluence",
                         "version": "0.3.0"
-                    }
+                    },
+                    "tools": tools
                 }
             }
             yield f"data: {json.dumps(init_message)}\n\n"
@@ -441,6 +543,15 @@ async def process_mcp_request(request_data: Dict[str, Any], jira_token: str = No
                         "data": f"Failed to get resources: {str(e)}"
                     }
                 }
+        
+        elif method == "notifications/initialized":
+            # Handle the initialized notification from the client
+            logger.info("Client sent notifications/initialized")
+            return {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {}
+            }
         
         else:
             return {

@@ -1,9 +1,6 @@
 [project]
 name = "mcp-jira-confluence-sse"
 version = "0.0.1"
-description = "Model Context Protocol server for Jira and Confluence with SSE transport"ject]
-name = "mcp-jira-confluence-sse"
-version = "1.0.0"
 description = "Model Context Protocol server for Jira and Confluence with SSE transport"
 readme = "README.md"
 requires-python = ">=3.12"
