@@ -1,11 +1,14 @@
 [project]
-name = "mcp-jira-confluence"
-version = "0.2.4"
-description = "Model Context Protocol server for Jira and Confluence"
+name = "mcp-jira-confluence-sse"
+version = "0.0.1"
+description = "Model Context Protocol server for Jira and Confluence with SSE transport"ject]
+name = "mcp-jira-confluence-sse"
+version = "1.0.0"
+description = "Model Context Protocol server for Jira and Confluence with SSE transport"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
-keywords = ["mcp", "jira", "confluence", "atlassian", "model-context-protocol"]
+keywords = ["mcp", "jira", "confluence", "atlassian", "model-context-protocol", "sse", "server-sent-events", "http"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -20,6 +23,20 @@ dependencies = [
     "mcp>=1.9.4",
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
+    "fastapi>=0.104.0",
+    "uvicorn>=0.24.0",
+    "sse-starlette>=1.8.0",
+    "python-multipart>=0.0.6",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.10.0",
+]
+metrics = [
+    "prometheus-client>=0.19.0",
 ]
 
 [[project.authors]]
@@ -27,14 +44,18 @@ name = "akhilthomas236"
 email = "akhilthomas236@gmail.com"
 
 [project.urls]
-Homepage = "https://github.com/akhilthomas236/mcp-jira-confluence"
-Repository = "https://github.com/akhilthomas236/mcp-jira-confluence"
-Issues = "https://github.com/akhilthomas236/mcp-jira-confluence/issues"
-Documentation = "https://github.com/akhilthomas236/mcp-jira-confluence/blob/main/README.md"
+Homepage = "https://github.com/akhilthomas236/mcp-jira-confluence-sse"
+Repository = "https://github.com/akhilthomas236/mcp-jira-confluence-sse"
+Issues = "https://github.com/akhilthomas236/mcp-jira-confluence-sse/issues"
+Documentation = "https://github.com/akhilthomas236/mcp-jira-confluence-sse/blob/main/README.md"
 
 [build-system]
 requires = [ "hatchling",]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_jira_confluence"]
+
 [project.scripts]
 mcp-jira-confluence = "mcp_jira_confluence.server:main"
+mcp-jira-confluence-sse = "mcp_jira_confluence.run_sse:main"

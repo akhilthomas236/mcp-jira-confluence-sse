@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "jira-confluence-sse": {
+      "transport": "sse",
+      "url": "http://localhost:8000/sse",
+      "timeout": 30000,
+      "headers": {
+        "User-Agent": "MCP-Client/1.0"
+      }
+    }
+  }
+}

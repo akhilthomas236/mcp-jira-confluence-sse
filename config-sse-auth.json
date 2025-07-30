@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "mcp-jira-confluence-sse": {
+      "command": "python",
+      "args": ["-m", "mcp_jira_confluence.sse_client"],
+      "env": {
+        "SSE_SERVER_URL": "http://localhost:8000",
+        "JIRA_PERSONAL_TOKEN": "your-jira-personal-access-token",
+        "CONFLUENCE_PERSONAL_TOKEN": "your-confluence-personal-access-token"
+      }
+    }
+  }
+}
